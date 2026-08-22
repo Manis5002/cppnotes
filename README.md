@@ -1187,3 +1187,398 @@ With rvalue references, C++ knows the temporary is about to be destroyed anyway,
 When using `continue` or `break` inside nested loops (loops inside loops), **they only affect the innermost loop** in which they are placed. They will not break or continue the outer loops.
 ### Best Practice for Modern C++
 Even if the compiler defaults to a specific version, it is best practice to explicitly specify the standard version you want to use (e.g., C++11, C++17, C++20) when compiling, ensuring you have access to the specific modern features you intend to use.
+
+
+# Move Semantics
+
+## Understanding Move Semantics
+In traditional C++, passing data often meant making a complete, physical copy of that data in memory (invoking the copy constructor). If the data was an rvalue (a temporary value that will be destroyed anyway), copying it was highly inefficient. 
+
+**Move Semantics** (introduced in C++11) allows you to avoid this copy by **transferring ownership** (or "stealing") the underlying resources (like heap memory pointers) from an rvalue object into a new object. 
+
+### Why is this cool?
+If you concatenate two massive strings `s1 + s2` to assign to `s3`, `s1 + s2` creates a temporary, hidden string. Instead of explicitly copying all the characters from that temporary string into `s3`, Move Semantics just takes the internal pointer of the temporary string and hands it to `s3`. The temporary is then left empty, and no actual data was duplicated.
+
+## `std::move`
+The function `std::move` (found in the `<utility>` header) does **not** actually move anything on its own. 
+* **Behavior:** It casts an lvalue (a named, persistent variable) into an **rvalue reference (`&&`)**.
+* **Effect:** This signals to the compiler: *"I am done using this object. You are allowed to steal its resources via the Move Constructor or Move Assignment Operator."*
+
+```cpp
+#include <iostream>
+#include <string>
+#include <utility> // Required for std::move
+
+int main() {
+    std::string myString = "A very long string...";
+    
+    // Explicitly steals the resource from 'myString' and gives it to 'newString'
+    std::string newString = std::move(myString); 
+    
+    std::cout << "newString: " << newString << '\n'; // Outputs the text
+    std::cout << "myString: "  << myString << '\n';  // Outputs nothing (it is empty)
+    
+    return 0;
+}
+```
+### Caveat
+After an object is moved from, it is left in a **"valid but unspecified state"**. For standard library objects like `std::string`, this usually means it becomes an empty string. You should not rely on the data of an object after it has been moved.
+
+---
+
+# Smart Pointers: Resource Management and RAII
+
+## The Problem with Raw Pointers
+Raw pointers (`int* p = new int;`) require you to manually manage the memory.
+1. You might forget to call `delete` (causing **Memory Leaks**).
+2. You might call the wrong delete (e.g., `delete p` instead of `delete[] p` for an array).
+3. If multiple pointers point to the same data, deleting it from one pointer makes all the others **Dangling Pointers**.
+
+## The Solution: Smart Pointers and RAII
+Modern C++ introduces Smart Pointers (`<memory>` header) which follow the principle of **RAII (Resource Acquisition Is Initialization)**.
+* **RAII Meaning:** The resource (heap memory) is tied directly to the lifetime of the pointer object. When the Smart Pointer object goes out of scope (hits the closing curly brace `}`), its destructor is automatically called, and it cleans up the heap memory for you. **You never have to write `delete` manually.**
+
+---
+
+# 1. `std::unique_ptr`
+
+## Core Concept
+A `std::unique_ptr` represents **exclusive ownership** of a resource. 
+* **Rule:** Only *one* `unique_ptr` can point to a specific block of memory at any given time.
+* **No Sharing:** You **cannot copy** a `unique_ptr`. The copy constructor is explicitly deleted.
+* **Move Only:** You can transfer ownership using `std::move`.
+
+## Creation: `std::make_unique`
+The modern and safest way to create a unique pointer is using `std::make_unique` (which acts as a factory function).
+
+```cpp
+#include <iostream>
+#include <memory>
+
+class MyType {
+public:
+    MyType() { std::cout << "Created\n"; }
+    ~MyType() { std::cout << "Destroyed\n"; }
+};
+
+int main() {
+    {
+        // 1. Create unique pointer
+        std::unique_ptr<MyType> p1 = std::make_unique<MyType>();
+        
+        // std::unique_ptr<MyType> p2 = p1; // COMPILE ERROR: Cannot copy!
+        
+        // 2. Transfer ownership safely
+        std::unique_ptr<MyType> p3 = std::move(p1); 
+        // p1 is now null. p3 owns the memory.
+        
+    } // p3 goes out of scope -> ~MyType is called automatically. Memory is freed.
+    
+    return 0;
+}
+```
+### Arrays with `unique_ptr`
+```cpp
+// Correct syntax for allocating an array of 10 items
+std::unique_ptr<MyType[]> arr = std::make_unique<MyType[]>(10);
+// Automatically uses delete[] when out of scope!
+```
+
+---
+
+# 2. `std::shared_ptr`
+
+## Core Concept
+A `std::shared_ptr` allows **multiple pointers to share ownership** of a single resource.
+* **Reference Counting:** Under the hood, a `shared_ptr` allocates a small "Control Block" that keeps an integer tally (the **Use Count**) of how many shared pointers are currently pointing to the data.
+* **Cleanup:** When a `shared_ptr` goes out of scope, the Use Count decreases by 1. When the count hits exactly `0`, the underlying memory is finally deleted.
+
+## Creation: `std::make_shared`
+```cpp
+#include <iostream>
+#include <memory>
+
+int main() {
+    {
+        std::shared_ptr<int> p1 = std::make_shared<int>(42);
+        std::cout << "Count: " << p1.use_count() << '\n'; // Outputs 1
+        
+        {
+            // You CAN copy shared pointers!
+            std::shared_ptr<int> p2 = p1; 
+            std::cout << "Count: " << p1.use_count() << '\n'; // Outputs 2
+        } // p2 goes out of scope. Count drops to 1. Memory is NOT deleted yet.
+        
+        std::cout << "Count: " << p1.use_count() << '\n'; // Outputs 1
+        
+    } // p1 goes out of scope. Count drops to 0. Memory is DELETED!
+    
+    return 0;
+}
+```
+*(Note: The internal reference counting mechanism is thread-safe).*
+
+---
+
+# 3. `std::weak_ptr`
+
+## Core Concept
+A `std::weak_ptr` is an observer. It points to a resource managed by a `shared_ptr`, but it **does not increase the reference count**. 
+* Because it doesn't affect the count, the memory can be deleted while the `weak_ptr` is still pointing at it. This makes it a "safe dangling pointer."
+
+## Use Cases
+1. **Breaking Cyclic Dependencies:** If `shared_ptr A` points to `B`, and `shared_ptr B` points to `A`, the use count will never drop to 0, causing a memory leak. You solve this by making one of those pointers a `weak_ptr`.
+2. **Observing volatile objects (Game Dev):** A missile might hold a `weak_ptr` to a target spaceship. If the spaceship gets destroyed by something else (count goes to 0), the missile can safely check if the ship still exists before trying to hit it.
+
+## Checking Validity: `.expired()`
+Because a `weak_ptr` does not guarantee the memory is still there, you must explicitly check if the resource is still valid before trying to use it.
+
+```cpp
+#include <iostream>
+#include <memory>
+
+int main() {
+    std::weak_ptr<int> weak;
+    
+    {
+        std::shared_ptr<int> shared = std::make_shared<int>(100);
+        weak = shared; // weak observes shared. Use count remains 1.
+        
+        std::cout << weak.expired() << '\n'; // Outputs 0 (False - it is valid)
+    } // 'shared' goes out of scope. Memory is deleted.
+    
+    std::cout << weak.expired() << '\n'; // Outputs 1 (True - the memory is gone)
+    
+    return 0;
+}
+```
+
+
+# Interface vs. Implementation in C++
+
+## Separation of Code
+In C++, code is typically split into two types of files to separate the **interface** (declarations) from the **implementation** (definitions).
+
+| File Type | Extension Convention | Purpose |
+| :--- | :--- | :--- |
+| **Interface** | `.hpp`, `.h`, `.inc` | Defines the API, types, and function declarations. Tells the compiler that these structures exist. |
+| **Implementation** | `.cpp`, `.cxx`, `.cc` | Contains the actual logic, algorithms, and function definitions (the code that does the work). |
+
+### Why Separate Interface from Implementation?
+1. **Information Hiding:** You can share the `.hpp` file (the API) and the compiled binary without revealing your proprietary source code logic.
+2. **Compilation Efficiency:** The compiler can compile `.cpp` files separately into object files (`.o` files). If you modify only one `.cpp` file, you only need to recompile that specific file rather than the entire project, significantly reducing build times.
+
+## Include Guards
+When creating header files, you must prevent the compiler from including the same file multiple times in a single compilation step, which would cause "multiple definition" errors. This is solved using **Include Guards** via preprocessor directives.
+
+```cpp
+// mathlib.hpp
+#ifndef MATHLIB_HPP
+#define MATHLIB_HPP
+
+// Declarations go here
+int add(int a, int b);
+
+#endif // MATHLIB_HPP
+```
+
+## The `#include` Directive
+Including a header file essentially performs a direct copy-and-paste of the header's contents into the current file before compilation. 
+
+**CRITICAL RULE:** Never `#include` a `.cpp` file. Always include the header (`.hpp` / `.h`) file.
+
+### `#include "..."` vs `#include <...>`
+
+| Syntax | Search Path | Use Case |
+| :--- | :--- | :--- |
+| `#include "file.hpp"` | Searches locally in relative file paths. | Your own project's files. |
+| `#include <file>` | Searches in the system/compiler's environment variables/paths (e.g., `/usr/include`). | Standard Library or installed external libraries (e.g., `<iostream>`, `<string>`). |
+
+---
+
+# Object-Oriented Programming: Classes
+
+## What is a Class?
+A class is a **User-Defined Type (UDT)**. While C++ has built-in primitive types (`int`, `float`), a class allows you to create custom types that group related data (attributes) and actions (functions) together. 
+* **Type:** The blueprint (the `class`).
+* **Instance (Object):** A specific realization of that class in memory.
+
+## Access Modifiers (Information Hiding)
+Classes control access to their internal data using access modifiers:
+* **`private` (Default in `class`):** Members can only be accessed from within the class itself.
+* **`public`:** Members can be accessed from outside the class.
+* **`protected`:** Used for inheritance (covered in advanced OOP).
+
+*(Note: In C++, a `struct` is identical to a `class`, except its default access modifier is `public`.)*
+
+## Anatomy of a Class
+
+```cpp
+#include <string>
+#include <iostream>
+
+class Student {
+private: 
+    // Data Members (Attributes)
+    // Convention: Prefix member variables with 'm_'
+    std::string m_name; 
+
+public:
+    // Constructor
+    Student() {
+        m_name = "No Name";
+        std::cout << "Constructor called\n";
+    }
+
+    // Member Function (Action)
+    void printName() {
+        std::cout << "Name is " << m_name << '\n';
+    }
+
+    // Destructor
+    ~Student() {
+        std::cout << "Destructor called\n";
+    }
+};
+```
+
+---
+
+# Constructors and Destructors
+
+## Special Member Functions
+Constructors and Destructors are special functions automatically invoked during an object's lifecycle.
+
+### The Constructor
+* **Purpose:** Called automatically when an object is instantiated (created). Used to initialize memory and default values.
+* **Syntax:** Same name as the class. No return type.
+* **Overloading:** You can have multiple constructors with different parameters.
+
+### The Destructor
+* **Purpose:** Called automatically when an object leaves its scope or is explicitly deleted via `delete`. Used to clean up resources (e.g., freeing heap memory).
+* **Syntax:** Preceded by a tilde (`~`) and the class name. Takes **zero parameters**.
+
+## Compiler-Generated Defaults
+If you do not define a constructor or a destructor, the C++ compiler automatically generates a **default constructor** and a **default destructor** for free. However, these default functions perform no custom initialization or dynamic cleanup.
+
+---
+
+# Class Implementation and Scope Resolution
+
+When separating a class into interface (`.hpp`) and implementation (`.cpp`), the `.cpp` file must explicitly state which class the functions belong to.
+
+### The Scope Resolution Operator (`::`)
+Used to link a function definition back to its class scope.
+
+```cpp
+// Student.hpp (Interface)
+class Student {
+private:
+    std::string m_name;
+public:
+    Student(std::string name); // Declaration only
+    void printName();          // Declaration only
+};
+```
+
+```cpp
+// Student.cpp (Implementation)
+#include "Student.hpp"
+#include <iostream>
+
+// Syntax: ReturnType ClassName::FunctionName(Params)
+
+Student::Student(std::string name) {
+    m_name = name;
+}
+
+void Student::printName() {
+    std::cout << "Name is " << m_name << '\n';
+}
+```
+
+---
+
+# Copy Semantics: Shallow vs. Deep Copy
+
+When you assign one object to another (e.g., `Object B = Object A;`), C++ provides a **default copy constructor** and **default copy assignment operator** for free. 
+
+## The Problem: Shallow Copy
+The compiler-generated defaults perform a **Shallow Copy**. They trivially copy the literal values of the member variables. 
+* If your class contains primitive data (like `float x, y, z;`), a shallow copy works perfectly.
+* **The Danger:** If your class manages dynamically allocated memory (a pointer to the heap), a shallow copy only copies the *memory address*, not the underlying data.
+
+### The "Double Free" Crash
+If Object A and Object B both shallow-copy the same heap pointer:
+1. Object B's pointer points to the exact same memory address as Object A.
+2. When Object A goes out of scope, its destructor calls `delete` on the memory.
+3. When Object B goes out of scope, its destructor tries to `delete` the *same memory address*, causing a **Double Free** crash (often seen in debuggers as a `tcache2` error or segmentation fault).
+
+## The Solution: Deep Copy
+To safely copy objects that manage dynamic memory, you must write your own custom Copy Constructor and Copy Assignment Operator to perform a **Deep Copy**. A Deep Copy allocates brand-new heap memory for the new object and explicitly copies the *values* over.
+
+---
+
+# Implementing Deep Copies
+
+Assume we have a class `Array` that dynamically manages a pointer `int* data` array of size 10.
+
+## 1. The Copy Constructor
+Called when a **new object** is created and initialized directly from an existing object.
+* **Triggered by:** `Array arr2 = arr1;` or `Array arr2(arr1);`
+* **Syntax:** `ClassName(const ClassName& rhs);` (Pass the Right-Hand Side object as a `const` reference).
+
+```cpp
+// Copy Constructor Definition
+Array::Array(const Array& rhs) {
+    std::cout << "Copy Constructor Called\n";
+    
+    // 1. Allocate NEW memory for this object
+    data = new int[10];
+    
+    // 2. Copy the actual values from the rhs object
+    for (int i = 0; i < 10; i++) {
+        data[i] = rhs.data[i];
+    }
+}
+```
+
+## 2. The Copy Assignment Operator
+Called when assigning an existing object to **another already-constructed object**.
+* **Triggered by:** `arr2 = arr1;` (Where both variables were created previously).
+* **Syntax:** `ClassName& operator=(const ClassName& rhs);`
+
+### The `this` Pointer
+Inside any member function, `this` is a built-in pointer that stores the memory address of the current object instance. Dereferencing it (`*this`) returns the object itself.
+
+```cpp
+// Copy Assignment Operator Definition
+Array& Array::operator=(const Array& rhs) {
+    std::cout << "Copy Assignment Operator Called\n";
+
+    // 1. Check for Self-Assignment (e.g., arr1 = arr1;)
+    if (this == &rhs) {
+        return *this; // Do nothing, just return the current object
+    }
+
+    // 2. Delete the old memory attached to this object to prevent leaks
+    if (data != nullptr) {
+        delete[] data;
+    }
+
+    // 3. Allocate NEW memory
+    data = new int[10];
+
+    // 4. Copy the data values
+    for (int i = 0; i < 10; i++) {
+        data[i] = rhs.data[i];
+    }
+
+    // 5. Return a reference to the current object (allows chaining: a = b = c)
+    return *this;
+}
+```
+
+### Important Copy Semantics Debugging Tip
+Always add `std::cout` print statements inside your Constructor, Copy Constructor, and Copy Assignment Operator when learning. It explicitly reveals exactly how many hidden copies the compiler is making, guiding you on when to optimize using references or Move Semantics.
+
